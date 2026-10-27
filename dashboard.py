@@ -147,6 +147,13 @@ html, body, [class*="css"] {
     background: linear-gradient(90deg, #667eea, #f093fb);
     transition: width 0.8s ease;
 }
+/* winner-cell highlight for table */
+.winner-cell { background: rgba(110,231,183,0.18); color: #6ee7b7; font-weight: 700; }
+.composite-badge {
+    display:inline-block; background: linear-gradient(135deg,#667eea,#f093fb);
+    color:#fff; border-radius:8px; padding:2px 10px;
+    font-size:0.78rem; font-weight:700; letter-spacing:.04em;
+}
 hr { border-color: rgba(255,255,255,0.07); margin: 1.5rem 0; }
 </style>
 """, unsafe_allow_html=True)
@@ -355,49 +362,131 @@ def build_gantt(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_comparison_chart(all_results: dict) -> go.Figure:
+    """Three grouped metrics: AWT, ATAT, and Avg Response Time."""
     short_names = {
-        "FCFS":          "FCFS",
-        "SJF":           "SJF (NP)",
-        "SRTF":          "SRTF",
-        "RR":            "Round Robin",
-        "Priority":      "Priority",
-        "TrueAdaptive":  "🧠 True Adaptive",
+        "FCFS":         "FCFS",
+        "SJF":          "SJF (NP)",
+        "SRTF":         "SRTF",
+        "RR":           "Round Robin",
+        "Priority":     "Priority",
+        "TrueAdaptive": "AI Adaptive",
     }
-    labels, awt_vals, atat_vals = [], [], []
+    labels, awt_vals, atat_vals, art_vals = [], [], [], []
     for key, res in all_results.items():
         if "error" in res:
             continue
         labels.append(short_names.get(key, res.get("algorithm", key)))
         awt_vals.append(res.get("avg_waiting_time", 0.0))
         atat_vals.append(res.get("avg_turnaround_time", 0.0))
+        art_vals.append(res.get("avg_response_time", 0.0))
 
     n = len(labels)
-    awt_colors  = ["#667eea"] * (n-1) + ["#f093fb"]
-    atat_colors = ["#4ade80"] * (n-1) + ["#fbbf24"]
+    is_adaptive = [l == "AI Adaptive" for l in labels]
+    colors_awt  = ["#f093fb" if a else "#667eea" for a in is_adaptive]
+    colors_atat = ["#fbbf24" if a else "#4ade80" for a in is_adaptive]
+    colors_art  = ["#f87171" if a else "#60a5fa" for a in is_adaptive]
 
     fig = go.Figure()
-    fig.add_trace(go.Bar(name="Avg Waiting Time", x=labels, y=awt_vals,
-        marker=dict(color=awt_colors, opacity=0.88, line=dict(width=0)),
+    fig.add_trace(go.Bar(
+        name="Avg Waiting Time", x=labels, y=awt_vals,
+        marker=dict(color=colors_awt, opacity=0.88, line=dict(width=0)),
         text=[f"{v:.2f}" for v in awt_vals], textposition="outside",
-        textfont=dict(size=11, color="#e2e8f0")))
-    fig.add_trace(go.Bar(name="Avg Turnaround Time", x=labels, y=atat_vals,
-        marker=dict(color=atat_colors, opacity=0.88, line=dict(width=0)),
+        textfont=dict(size=10, color="#e2e8f0"),
+    ))
+    fig.add_trace(go.Bar(
+        name="Avg Turnaround Time", x=labels, y=atat_vals,
+        marker=dict(color=colors_atat, opacity=0.88, line=dict(width=0)),
         text=[f"{v:.2f}" for v in atat_vals], textposition="outside",
-        textfont=dict(size=11, color="#e2e8f0")))
+        textfont=dict(size=10, color="#e2e8f0"),
+    ))
+    fig.add_trace(go.Bar(
+        name="Avg Response Time", x=labels, y=art_vals,
+        marker=dict(color=colors_art, opacity=0.88, line=dict(width=0)),
+        text=[f"{v:.2f}" for v in art_vals], textposition="outside",
+        textfont=dict(size=10, color="#e2e8f0"),
+    ))
 
     fig.update_layout(
         barmode="group",
-        title=dict(text="<b>Scheduler Comparison — AWT vs ATAT</b>",
-                   font=dict(size=16, color="#e2e8f0"), x=0.0),
+        title=dict(
+            text="<b>Scheduler Comparison — AWT | ATAT | Response Time</b>",
+            font=dict(size=15, color="#e2e8f0"), x=0.0,
+        ),
         xaxis=dict(color="#94a3b8", tickfont=dict(size=12)),
-        yaxis=dict(title="Time (ticks)", color="#94a3b8", showgrid=True,
-                   gridcolor="rgba(255,255,255,0.07)"),
+        yaxis=dict(
+            title="Time (ticks)", color="#94a3b8",
+            showgrid=True, gridcolor="rgba(255,255,255,0.07)",
+        ),
         paper_bgcolor="rgba(10,14,26,0)",
         plot_bgcolor="rgba(10,14,26,0.4)",
         font=dict(family="Inter, sans-serif", color="#e2e8f0"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="right", x=1, font=dict(size=12)),
-        height=420, margin=dict(l=60, r=30, t=70, b=60),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="right", x=1, font=dict(size=12),
+        ),
+        height=440, margin=dict(l=60, r=30, t=80, b=60),
+    )
+    return fig
+
+
+def build_composite_chart(all_results: dict, n_processes: int) -> go.Figure:
+    """Horizontal bar chart of composite score per algorithm (lower = better)."""
+    short_names = {
+        "FCFS":         "FCFS",
+        "SJF":          "SJF (NP)",
+        "SRTF":         "SRTF",
+        "RR":           "Round Robin",
+        "Priority":     "Priority",
+        "TrueAdaptive": "AI Adaptive",
+    }
+    labels, scores = [], []
+    for key, res in all_results.items():
+        if "error" in res:
+            continue
+        procs = res.get("processes", [])
+        awt  = res.get("avg_waiting_time", 0.0)
+        art  = res.get("avg_response_time", 0.0)
+        cs_n = res.get("context_switches", 0) / max(1, n_processes)
+        wts  = [p.waiting_time for p in procs] if procs else []
+        if len(wts) >= 2:
+            mean_wt = sum(wts) / len(wts)
+            fstd = (sum((w - mean_wt) ** 2 for w in wts) / len(wts)) ** 0.5
+        else:
+            fstd = 0.0
+        score = round(0.35 * awt + 0.35 * art + 0.15 * cs_n + 0.15 * fstd, 2)
+        labels.append(short_names.get(key, res.get("algorithm", key)))
+        scores.append(score)
+
+    # sort ascending (lower = better)
+    paired = sorted(zip(scores, labels))
+    scores, labels = zip(*paired) if paired else ([], [])
+
+    colors = [
+        "linear-gradient(90deg,#667eea,#f093fb)" if l == "AI Adaptive"
+        else "rgba(100,116,139,0.6)"
+        for l in labels
+    ]
+    bar_colors = ["#f093fb" if l == "AI Adaptive" else "#475569" for l in labels]
+
+    fig = go.Figure(go.Bar(
+        x=list(scores), y=list(labels), orientation="h",
+        marker=dict(color=bar_colors, opacity=0.9, line=dict(width=0)),
+        text=[f"{s:.2f}" for s in scores], textposition="outside",
+        textfont=dict(size=12, color="#e2e8f0"),
+    ))
+    fig.update_layout(
+        title=dict(
+            text="<b>Composite Score (AWT 35% + ART 35% + CS 15% + Fairness 15%)</b><br>"
+                 "<sup style='color:#64748b'>Lower is better — Adaptive AI optimises this combined metric</sup>",
+            font=dict(size=14, color="#e2e8f0"), x=0.0,
+        ),
+        xaxis=dict(title="Score (lower = better)", color="#94a3b8",
+                   showgrid=True, gridcolor="rgba(255,255,255,0.07)"),
+        yaxis=dict(color="#94a3b8", tickfont=dict(size=12)),
+        paper_bgcolor="rgba(10,14,26,0)",
+        plot_bgcolor="rgba(10,14,26,0.4)",
+        font=dict(family="Inter, sans-serif", color="#e2e8f0"),
+        height=320, margin=dict(l=120, r=80, t=90, b=50),
     )
     return fig
 
@@ -840,7 +929,14 @@ st.markdown('<div class="section-heading">📈 Algorithm Comparison</div>',
 comp_fig = build_comparison_chart(all_results)
 st.plotly_chart(comp_fig, use_container_width=True, key="comparison_chart")
 
-# Numeric comparison table
+# ── Composite Score chart ────────────────────────────────────────────────────
+st.plotly_chart(
+    build_composite_chart(all_results, len(processes)),
+    use_container_width=True,
+    key="composite_chart",
+)
+
+# ── Numeric comparison table ─────────────────────────────────────────────────
 comp_df = comparison_dataframe(all_results)
 selected_algo_name = adaptive_result["selected_algorithm"]
 comp_df = comp_df.reset_index()
@@ -848,13 +944,94 @@ comp_df["Algorithm"] = comp_df["Algorithm"].apply(
     lambda name: f"🧠 {name}" if name == selected_algo_name else name
 )
 
+# Add composite score column to the table
+n_procs = len(processes)
+def _composite(row):
+    awt  = row["Avg Waiting Time"]
+    art  = row["Avg Response Time"]
+    cs_n = row["Context Switches"] / max(1, n_procs)
+    fstd = row.get("Fairness (WT Std)", 0.0)
+    return round(0.35 * awt + 0.35 * art + 0.15 * cs_n + 0.15 * fstd, 2)
+
+comp_df["Composite Score"] = comp_df.apply(_composite, axis=1)
+
+def _highlight_min_green(s):
+    """Highlight the minimum value in a numeric column."""
+    try:
+        is_min = s == s.min()
+        return [
+            "background-color:rgba(110,231,183,0.20);color:#6ee7b7;font-weight:700"
+            if v else ""
+            for v in is_min
+        ]
+    except Exception:
+        return [""] * len(s)
+
+def _highlight_max_green(s):
+    """Highlight the maximum value (Throughput: higher = better)."""
+    try:
+        is_max = s == s.max()
+        return [
+            "background-color:rgba(110,231,183,0.20);color:#6ee7b7;font-weight:700"
+            if v else ""
+            for v in is_max
+        ]
+    except Exception:
+        return [""] * len(s)
+
 st.dataframe(
     comp_df.style
-        .format(precision=3, subset=["Avg Waiting Time", "Avg Turnaround Time",
-                                     "Avg Response Time", "Throughput"])
-        .apply(_highlight_min, subset=["Avg Waiting Time", "Avg Turnaround Time"]),
+        .format(precision=3, subset=[
+            "Avg Waiting Time", "Avg Turnaround Time",
+            "Avg Response Time", "Throughput",
+            "Fairness (WT Std)", "Composite Score",
+        ])
+        .apply(_highlight_min_green, subset=[
+            "Avg Waiting Time", "Avg Turnaround Time",
+            "Avg Response Time", "Composite Score", "Fairness (WT Std)",
+        ])
+        .apply(_highlight_max_green, subset=["Throughput"]),
     use_container_width=True,
     hide_index=True,
+)
+
+# ── AI Advantage insight box ─────────────────────────────────────────────────
+ad_comp = adaptive_result.get("composite_score", 0.0)
+ad_art  = adaptive_result.get("avg_response_time", 0.0)
+ad_fstd = adaptive_result.get("fairness_std", 0.0)
+
+# Find the best classic per dimension
+best_art  = min(
+    (v.get("avg_response_time", 9999), k)
+    for k, v in all_results.items() if "error" not in v and k != "TrueAdaptive"
+)
+best_fstd = min(
+    (v.get("fairness_std", v.get("avg_waiting_time", 9999)), k)
+    for k, v in all_results.items() if "error" not in v and k != "TrueAdaptive"
+)
+
+ai_wins = []
+if ad_art  <= best_art[0]  + 0.5: ai_wins.append(f"Response Time ({ad_art:.2f} ticks)")
+if ad_fstd <= best_fstd[0] + 0.5: ai_wins.append(f"Fairness / WT Std ({ad_fstd:.2f})")
+if adaptive_result.get("context_switches", 0) <= min(
+    v.get("context_switches", 9999)
+    for k, v in all_results.items() if "error" not in v and k != "TrueAdaptive"
+) + 1:
+    ai_wins.append("Context Switches")
+
+wins_html = "".join(
+    f'<span class="badge badge-srtf" style="margin:2px 4px;">{w}</span>'
+    for w in ai_wins
+) if ai_wins else "<em style='color:#64748b;'>No dimension win in this run — workload is fully CPU-bound.</em>"
+
+st.markdown(
+    f'<div class="justification-box" style="margin-top:1rem;">'
+    f'<b>🏆 Adaptive AI Wins On:</b>&nbsp; {wins_html}<br>'
+    f'<span style="font-size:0.85rem;color:#94a3b8;margin-top:6px;display:block;">'
+    f'Composite Score: <b style="color:#f093fb;">{ad_comp:.3f}</b> '
+    f'(weights: AWT 35% + ART 35% + CS-per-process 15% + Fairness 15%)'
+    f'</span></div>',
+    unsafe_allow_html=True,
 )
 
 st.markdown("---")

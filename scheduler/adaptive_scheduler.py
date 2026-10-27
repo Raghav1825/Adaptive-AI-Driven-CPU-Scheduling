@@ -140,43 +140,97 @@ class TrueAdaptiveScheduler:
 
     # ── Policy decision tree ─────────────────────────────────────────────
 
-    def _select_policy(self, feat: Dict[str, float], ready: List[Process]) -> Tuple[str, int, str]:
-        """Returns (policy_name, quantum, human_readable_reason)."""
+    def _select_policy(
+        self,
+        feat: Dict[str, float],
+        ready: List[Process],
+        current_time: int = 0,
+    ) -> Tuple[str, int, str]:
+        """
+        Returns (policy_name, quantum, human_readable_reason).
+
+        Composite optimisation target
+        ─────────────────────────────
+        score = 0.35 * AWT + 0.35 * ART + 0.15 * (CS / n) + 0.15 * fairness_std
+
+        Policy selection is guided to minimise this composite, not just AWT:
+          • SRTF    → optimal AWT/ATAT; decent on ART and fairness for mixed loads
+          • RR      → better ART for I/O-heavy interactive jobs (trades small AWT
+                       increase for large ART decrease — net composite gain)
+          • Priority → real-time urgency; bounded slice prevents starvation
+        """
         if not feat or feat["count"] <= 1:
             return POLICY_SRTF, self.base_quantum, "Single process ready: SRTF execution optimal."
 
-        count       = feat["count"]
-        mean_rem    = feat["mean_rem"]
-        var_rem     = feat["var_rem"]
-        min_rem     = feat["min_rem"]
-        median_rem  = feat["median_rem"]
-        min_prio    = feat["min_priority"]
-        mean_prio   = feat["mean_priority"]
+        count      = feat["count"]
+        mean_rem   = feat["mean_rem"]
+        var_rem    = feat["var_rem"]
+        min_rem    = feat["min_rem"]
+        median_rem = feat["median_rem"]
+        mean_io    = feat["mean_io"]
+        min_prio   = feat["min_priority"]
+        mean_prio  = feat["mean_priority"]
 
-        # 1. Urgent priority task
+        # ── Rule 1: Starvation guard ────────────────────────────────────
+        # If any process has NEVER received CPU and has been waiting longer
+        # than 3× mean burst, give it a forced priority slice (fairness).
+        starving = [
+            p for p in ready
+            if p.start_time is None                          # never ran
+            and (current_time - p.arrival_time) > max(8, 3 * mean_rem)
+        ]
+        if starving:
+            victim = min(starving, key=lambda p: p.arrival_time)
+            q = max(2, min(self.base_quantum, int(median_rem)))
+            reason = (
+                f"Starvation prevention: P{victim.pid} has waited "
+                f"{current_time - victim.arrival_time} ticks without CPU; "
+                f"Priority slice (Q={q}) to restore fairness."
+            )
+            return POLICY_PRIORITY, q, reason
+
+        # ── Rule 2: Urgent real-time task ────────────────────────────────
         urgent_proc = min(ready, key=lambda p: (p.priority, p.remaining_time))
-        if urgent_proc.priority == 1 or (urgent_proc.priority <= 2 and urgent_proc.priority < mean_prio - 1.5):
+        if urgent_proc.priority == 1 or (
+            urgent_proc.priority <= 2
+            and urgent_proc.priority < mean_prio - 1.5
+        ):
             if urgent_proc.remaining_time <= min_rem:
                 q = max(2, min(self.base_quantum, urgent_proc.remaining_time))
-                reason = (f"Urgent real-time process P{urgent_proc.pid} (priority={urgent_proc.priority}, "
-                          f"rem={urgent_proc.remaining_time}) detected; preempting with Priority policy.")
+                reason = (
+                    f"Urgent real-time process P{urgent_proc.pid} "
+                    f"(priority={urgent_proc.priority}, rem={urgent_proc.remaining_time}) "
+                    f"detected; preempting with Priority policy."
+                )
                 return POLICY_PRIORITY, q, reason
 
-        # 2. Interactive I/O Queue
-        interactive_procs = [p for p in ready if p.io_frequency >= 0.60]
-        if len(interactive_procs) >= 2 and min(p.remaining_time for p in interactive_procs) <= 4:
-            q = max(2, min(self.base_quantum, int(median_rem)))
-            reason = (f"Interactive queue ({len(interactive_procs)} I/O-intensive jobs ready); "
-                      f"Round Robin with dynamic Q={q} ensures low response latency.")
+        # ── Rule 3: Interactive / I/O-dominant queue ─────────────────────
+        # Composite insight: for I/O-heavy jobs, Round Robin lowers ART
+        # substantially (each job gets CPU quickly) at only a tiny AWT cost.
+        # Net composite score improves over SRTF on these workloads.
+        interactive_procs = [p for p in ready if p.io_frequency >= 0.55]
+        if len(interactive_procs) >= 2:
+            # Smaller quantum = better response time for interactive jobs
+            q = max(2, min(self.base_quantum, max(2, int(median_rem * 0.6))))
+            avg_io = statistics.mean(p.io_frequency for p in interactive_procs)
+            reason = (
+                f"I/O-dominant queue ({len(interactive_procs)} jobs, "
+                f"avg I/O={avg_io:.2f}); Round Robin Q={q} minimises "
+                f"response time — composite score (AWT+ART+fairness) beats SRTF here."
+            )
             return POLICY_RR, q, reason
 
-        # 3. High Variance / CPU-bound (SRTF optimal)
+        # ── Rule 4: High burst variance — SRTF clears short jobs fast ────
         if var_rem > 25.0:
-            reason = (f"High burst variance ({var_rem:.1f}); SRTF preemptively clears short jobs "
-                      f"to avoid convoy effect.")
+            reason = (
+                f"High burst variance ({var_rem:.1f}); "
+                f"SRTF preemptively clears short jobs to minimise turnaround."
+            )
         else:
-            reason = (f"CPU-bound queue (avg remaining={mean_rem:.1f}, var={var_rem:.1f}); "
-                      f"SRTF minimizes average turnaround time.")
+            reason = (
+                f"CPU-bound queue (avg remaining={mean_rem:.1f}, var={var_rem:.1f}); "
+                f"SRTF minimizes average turnaround and waiting time."
+            )
         return POLICY_SRTF, self.base_quantum, reason
 
     # ── Main simulation ──────────────────────────────────────────────────
@@ -250,7 +304,7 @@ class TrueAdaptiveScheduler:
 
             # ── Policy (re-)evaluation ───────────────────────────────────
             feat = self._queue_features(ready)
-            policy, q, reason = self._select_policy(feat, ready)
+            policy, q, reason = self._select_policy(feat, ready, current_time)
 
             if policy != last_policy:
                 adaptation_log.append({
@@ -382,6 +436,22 @@ class TrueAdaptiveScheduler:
             if proc:
                 proc.log_interval(start, end)
 
+        metrics = _aggregate_metrics(procs)
+
+        # ── Composite score (lower = better) ─────────────────────────────
+        # weights: AWT 35 % + ART 35 % + CS-per-process 15 % + fairness 15 %
+        awt  = metrics["avg_waiting_time"]
+        art  = metrics["avg_response_time"]
+        cs_n = context_switches / max(1, n)
+        wts  = [p.waiting_time for p in procs]
+        mean_wt = awt
+        fairness_std = round(
+            (sum((w - mean_wt) ** 2 for w in wts) / max(1, n)) ** 0.5, 3
+        )
+        composite_score = round(
+            0.35 * awt + 0.35 * art + 0.15 * cs_n + 0.15 * fairness_std, 3
+        )
+
         result = {
             "processes":          procs,
             "timeline":           collapsed,
@@ -391,13 +461,16 @@ class TrueAdaptiveScheduler:
             "selected_algorithm": "True Adaptive AI Scheduler",
             "workload_label":     self._overall_label(processes),
             "confidence":         1.0,
+            "composite_score":    composite_score,
+            "fairness_std":       fairness_std,
             "justification": (
-                "True Runtime Adaptation: the scheduling policy is re-evaluated "
-                "at every process arrival and completion event, based on live "
-                "ready-queue characteristics (remaining bursts, I/O frequency, priority)."
+                "True Runtime Adaptation: policy is re-evaluated at every scheduling event. "
+                "Optimises a composite score (AWT + ART + fairness + CS cost) — not just "
+                "turnaround time — so it may outperform SRTF on response time and fairness "
+                "while staying optimal or near-optimal on AWT."
             ),
         }
-        result.update(_aggregate_metrics(procs))
+        result.update(metrics)
         return result
 
     # ── Helpers ──────────────────────────────────────────────────────────

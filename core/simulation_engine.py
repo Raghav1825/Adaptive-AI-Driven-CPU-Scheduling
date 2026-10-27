@@ -183,11 +183,18 @@ class SimulationEngine:
         span = (max(all_completions) - min(all_arrivals)) if all_completions else 1
         throughput = n / span if span > 0 else float(n)
 
+        wts = [p.waiting_time for p in procs]
+        mean_wt = total_wt / n
+        fairness_std = round(
+            (sum((w - mean_wt) ** 2 for w in wts) / n) ** 0.5, 3
+        )
+
         return {
-            "avg_waiting_time": round(total_wt / n, 3),
+            "avg_waiting_time":    round(total_wt / n, 3),
             "avg_turnaround_time": round(total_tt / n, 3),
-            "avg_response_time": round(total_rt / n, 3),
-            "throughput": round(throughput, 4),
+            "avg_response_time":   round(total_rt / n, 3),
+            "throughput":          round(throughput, 4),
+            "fairness_std":        fairness_std,
         }
 
     def context_switch_summary(self, results: Dict[str, Dict[str, Any]]) -> Dict[str, int]:

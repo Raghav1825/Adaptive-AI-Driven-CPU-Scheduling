@@ -163,13 +163,23 @@ def comparison_dataframe(results: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
     for algo_key, res in results.items():
         if "error" in res:
             continue
+
+        procs = res.get("processes", [])
+        wts   = [p.waiting_time for p in procs] if procs else []
+        if len(wts) >= 2:
+            mean_wt = sum(wts) / len(wts)
+            fairness = round((sum((w - mean_wt) ** 2 for w in wts) / len(wts)) ** 0.5, 3)
+        else:
+            fairness = 0.0
+
         rows.append({
-            "Algorithm": res.get("algorithm", algo_key),
-            "Avg Waiting Time": res.get("avg_waiting_time", 0.0),
+            "Algorithm":           res.get("algorithm", algo_key),
+            "Avg Waiting Time":    res.get("avg_waiting_time", 0.0),
             "Avg Turnaround Time": res.get("avg_turnaround_time", 0.0),
-            "Avg Response Time": res.get("avg_response_time", 0.0),
-            "Throughput": res.get("throughput", 0.0),
-            "Context Switches": res.get("context_switches", 0),
+            "Avg Response Time":   res.get("avg_response_time", 0.0),
+            "Throughput":          res.get("throughput", 0.0),
+            "Context Switches":    res.get("context_switches", 0),
+            "Fairness (WT Std)":   fairness,
         })
     return pd.DataFrame(rows).set_index("Algorithm")
 
